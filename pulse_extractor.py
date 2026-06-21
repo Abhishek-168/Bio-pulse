@@ -115,10 +115,28 @@ class PulseExtractor:
     """
 
     def __init__(self, fps: float = 30.0, buffer_seconds: int = 10,
-                 channel_mode: str = "pos"):
+                 channel_mode: str = "pos", detrend_mode: str = "smoothness"):
         self.fps = fps
         self.buffer_size = int(fps * buffer_seconds)
         self.channel_mode = channel_mode
+
+        # Signal-conditioning chain (ported from prouast/heartbeat-js):
+        #   "smoothness" — standardize → smoothness-priors detrend (Tarvainen
+        #                  2002) → moving average. Removes baseline wander far
+        #                  better than a linear fit.
+        #   "linear"     — legacy: subtract a linear polyfit trend.
+        self.detrend_mode = detrend_mode
+        self.detrend_lambda = float(fps)   # heartbeat-js uses lambda = fps
+        # heartbeat-js applies a 3-pass moving average because it has no IIR
+        # bandpass. We keep a Butterworth bandpass, which already low-passes the
+        # signal; measured against synthetic data, adding the MA on top only
+        # concentrates broadband noise in-band and SHRINKS the real-vs-noise SNR
+        # separation. So the MA is disabled by default (passes=0) while the
+        # method remains available for faithfulness/experimentation.
+        self._ma_passes = 0
+        self._ma_kernel = max(int(fps / 6), 2)
+        self._detrend_M = None             # cached detrend matrix, keyed on length
+        self._filtered_cache = None        # per-frame cache of the filtered signal
 
         # Three parallel channel buffers (vectorize cleaner than a deque of tuples)
         self._r_buf = deque(maxlen=self.buffer_size)
@@ -170,6 +188,7 @@ class PulseExtractor:
         self._r_buf.append(float(r))
         self._g_buf.append(float(g))
         self._b_buf.append(float(b))
+        self._filtered_cache = None  # invalidate: buffer changed
 
     def add_sample_green(self, green: float):
         """
@@ -182,6 +201,7 @@ class PulseExtractor:
         self._r_buf.append(v)
         self._g_buf.append(v)
         self._b_buf.append(v)
+        self._filtered_cache = None  # invalidate: buffer changed
 
     def get_signal_length(self) -> int:
         """Return the current number of samples in the buffer."""
@@ -263,36 +283,90 @@ class PulseExtractor:
         # green: just the green channel (legacy behavior)
         return C[1] - np.mean(C[1])
 
+    # ──────────────────────────────────────────────
+    # Signal conditioning (ported from prouast/heartbeat-js)
+    # ──────────────────────────────────────────────
+    @staticmethod
+    def _standardize(sig: np.ndarray) -> np.ndarray:
+        """Z-score the signal (subtract mean, divide by std)."""
+        std = np.std(sig)
+        if std < 1e-8:
+            return sig - np.mean(sig)
+        return (sig - np.mean(sig)) / std
+
+    def _detrend_smoothness(self, sig: np.ndarray) -> np.ndarray:
+        """
+        Smoothness-priors detrending (Tarvainen et al. 2002), as used by
+        heartbeat-js. Removes baseline wander while preserving the pulse:
+
+            z_detrended = (I − (I + λ²·D₂ᵀD₂)⁻¹) · z
+
+        where D₂ is the 2nd-order difference operator and λ controls the
+        cutoff (heartbeat-js uses λ = fps). The (I − inv) matrix depends only
+        on the signal length and λ, so it is built once and cached.
+        """
+        n = len(sig)
+        if n < 3:
+            return sig - np.mean(sig)
+        if self._detrend_M is None or self._detrend_M.shape[0] != n:
+            ident = np.eye(n)
+            d2 = np.diff(ident, n=2, axis=0)              # (n-2, n)
+            lam2 = self.detrend_lambda ** 2
+            self._detrend_M = ident - np.linalg.inv(ident + lam2 * (d2.T @ d2))
+        return self._detrend_M @ sig
+
+    def _moving_average(self, sig: np.ndarray) -> np.ndarray:
+        """Apply an N-pass moving-average smoother (heartbeat-js: 3 passes)."""
+        k = self._ma_kernel
+        if k < 2:
+            return sig
+        kernel = np.ones(k) / k
+        for _ in range(self._ma_passes):
+            sig = np.convolve(sig, kernel, mode="same")
+        return sig
+
     def get_filtered_signal(self) -> np.ndarray:
         """
         Return the bandpass-filtered pulse signal.
 
         Steps:
         1. Project RGB → 1-D pulse (POS/CHROM/green)
-        2. Detrend (remove residual linear drift from lighting changes)
-        3. Apply Butterworth bandpass filter
+        2. Condition the signal:
+             - detrend_mode="smoothness" (default, from heartbeat-js):
+               standardize → smoothness-priors detrend → moving average
+             - detrend_mode="linear": subtract a linear polyfit trend (legacy)
+        3. Apply Butterworth bandpass filter to enforce the cardiac band
+
+        The result is cached per frame (invalidated by add_sample) because the
+        smoothness detrend's matrix multiply is reused by get_bpm /
+        get_harmonic_ratio / get_hrv_metrics / get_peak_regularity each frame.
         """
+        if self._filtered_cache is not None:
+            return self._filtered_cache
         if not self.is_ready():
             return np.array([])
 
         signal = self._project()
 
-        # Detrend: remove linear trend using numpy polyfit.
-        # POS/CHROM already remove DC via temporal-mean normalization;
-        # this kills any residual slow drift before filtering.
-        n = len(signal)
-        x = np.arange(n, dtype=np.float64)
-        coeffs = np.polyfit(x, signal, 1)  # linear fit: [slope, intercept]
-        trend = np.polyval(coeffs, x)
-        signal = signal - trend
+        if self.detrend_mode == "smoothness":
+            signal = self._standardize(signal)
+            signal = self._detrend_smoothness(signal)
+            signal = self._moving_average(signal)
+        else:
+            # Legacy: remove a linear trend via polyfit.
+            n = len(signal)
+            x = np.arange(n, dtype=np.float64)
+            trend = np.polyval(np.polyfit(x, signal, 1), x)
+            signal = signal - trend
 
-        # Apply bandpass filter
+        # Apply bandpass filter to enforce the cardiac band for SNR/harmonics
         try:
             filtered = filtfilt(self.b, self.a, signal)
         except ValueError:
             # filtfilt can fail if signal is too short relative to filter order
             return np.array([])
 
+        self._filtered_cache = filtered
         return filtered
 
     # ──────────────────────────────────────────────
@@ -463,8 +537,9 @@ class PulseExtractor:
         # rejects pure noise. The upper bound is generous (0.50) because real
         # rPPG peak detection on a short noisy buffer naturally inflates IBI
         # CV well past true physiological HRV — too tight here falsely rejects
-        # real people.
-        CV_MIN, CV_MAX = 0.02, 0.50
+        # real people. The lower bound (0.035) sits between a synthetic tone's
+        # quantization-limited CV (~0.02) and real human HRV (~0.05–0.10).
+        CV_MIN, CV_MAX = 0.035, 0.50
         result = {"ibi_cv": 0.0, "rmssd": 0.0, "jitter_ok": False, "rsa_power": None}
 
         filtered = self.get_filtered_signal()
@@ -549,3 +624,5 @@ class PulseExtractor:
         self._b_buf.clear()
         self._bpm_est = None
         self._bpm_var = 1e3
+        self._filtered_cache = None
+        # keep _detrend_M: it depends only on length+lambda, safe to reuse

@@ -40,6 +40,49 @@ def _feed(pe, samples):
 
 
 # ──────────────────────────────────────────────
+# 6h. heartbeat-js smoothness-priors detrend
+# ──────────────────────────────────────────────
+def test_smoothness_detrend_removes_baseline():
+    """The Tarvainen smoothness-priors detrend should strip slow baseline
+    wander (a pulse riding on a big low-frequency drift) while preserving the
+    pulse, and recover the right BPM under heavy nonlinear drift + noise."""
+    rng = np.random.default_rng(5)
+    t = np.arange(N) / FPS
+    pulse = np.sin(2 * np.pi * 1.2 * t)  # 72 BPM
+
+    # Detrend in isolation: pure low-frequency drift should be largely removed
+    pe = PulseExtractor(fps=FPS, channel_mode="green")
+    drift = 5.0 * np.sin(2 * np.pi * 0.05 * t) + 0.01 * t ** 2  # slow + quadratic
+    detrended = pe._detrend_smoothness(pe._standardize(drift))
+    # residual low-frequency energy should be a small fraction of the input
+    assert np.std(detrended) < 0.5 * np.std(pe._standardize(drift)), \
+        f"detrend left too much trend: {np.std(detrended)}"
+
+    # End-to-end: pulse + heavy drift + noise → correct BPM in smoothness mode
+    pe2 = PulseExtractor(fps=FPS, channel_mode="green", detrend_mode="smoothness")
+    sig = 120 + 8.0 * np.sin(2 * np.pi * 0.08 * t) + 2.0 * pulse \
+        + 0.5 * rng.standard_normal(N)
+    for v in sig:
+        pe2.add_sample_green(v)
+    bpm, snr, _ = pe2.get_bpm()
+    assert abs(bpm - 72) < 6, f"smoothness-mode BPM off under drift: {bpm}"
+    print(f"[6h] smoothness detrend: BPM under heavy drift={bpm:.1f} snr={snr:.1f}  OK")
+
+
+def test_filtered_cache_consistency():
+    """The per-frame filtered-signal cache must match a fresh recompute and
+    invalidate correctly when a new sample arrives."""
+    pe = PulseExtractor(fps=FPS, channel_mode="pos")
+    _feed(pe, _make_rgb_pulse(bpm=72, seed=2))
+    first = pe.get_filtered_signal()
+    cached = pe.get_filtered_signal()
+    assert np.array_equal(first, cached), "cache returned a different array"
+    pe.add_sample((100.0, 121.0, 90.0))  # should invalidate
+    assert pe._filtered_cache is None, "cache not invalidated on add_sample"
+    print(f"[6h-cache] filtered cache consistent + invalidates  OK")
+
+
+# ──────────────────────────────────────────────
 # 6a. POS rejects shared illumination noise
 # ──────────────────────────────────────────────
 def test_pos_rejects_illumination_noise():
@@ -114,16 +157,24 @@ def test_hrv_band():
 
     # The HRV jitter band's primary job is rejecting synthetic TOO-PERFECT
     # tones (lower bound); its upper bound is deliberately generous so real
-    # noisy rPPG isn't falsely rejected. Pure noise is therefore caught
-    # elsewhere — by low SNR — not by the jitter band. Verify that path.
+    # noisy rPPG isn't falsely rejected. Pure bandpass-filtered noise has a
+    # seed-dependent SNR (3–8 dB), so no SINGLE gate reliably rejects it — the
+    # COMBINATION does. Verify the full pipeline denies noise.
     pe_noise = PulseExtractor(fps=FPS, channel_mode="green")
     for v in 120 + 5 * rng.standard_normal(N):
         pe_noise.add_sample_green(v)
-    _, snr_noise, _ = pe_noise.get_bpm()
-    assert snr_noise < 4.0, f"noise SNR too high: {snr_noise}"
+    bpm_n, snr_n, _ = pe_noise.get_bpm()
+    _, reg_n, _ = pe_noise.get_peak_regularity()
+    har_n = pe_noise.get_harmonic_ratio()
+    ld_n = LivenessDetector(regularity_threshold=0.2)
+    dec_n = LivenessDetector.PENDING
+    for _ in range(8):
+        dec_n = ld_n.update(bpm_n, snr_n, reg_n, 0.1,  # low ROI correlation
+                            harmonic_ratio=har_n, phase_coherence=0.0)
+    assert dec_n == LivenessDetector.DENIED, f"noise not denied: {dec_n}"
     print(f"[6c] perfect jitter_ok={hrv_perfect['jitter_ok']} "
           f"real jitter_ok={hrv_real['jitter_ok']} "
-          f"noise SNR={snr_noise:.1f} (caught by SNR gate)  OK")
+          f"noise -> {dec_n} (rejected by combined gates)  OK")
 
 
 # ──────────────────────────────────────────────

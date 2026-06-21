@@ -71,15 +71,16 @@ class LivenessDetector:
     def __init__(
         self,
         bpm_window: int = 8,
-        snr_threshold: float = 4.0,
-        bpm_range: tuple = (50, 160),
-        consistency_threshold: float = 15.0,
+        snr_threshold: float = 1.5,
+        bpm_range: tuple = (45, 180),
+        consistency_threshold: float = 25.0,
         min_readings: int = 5,
-        regularity_threshold: float = 0.2,
-        correlation_threshold: float = 0.4,
-        harmonic_threshold: float = 0.05,
-        phase_threshold: float = 0.3,
+        regularity_threshold: float = 0.15,
+        correlation_threshold: float = 0.3,
+        harmonic_threshold: float = 0.03,
+        phase_threshold: float = 0.1,
         screen_veto_threshold: float = 0.5,
+        quality_ratio_threshold: float = 0.5,
     ):
         self.bpm_history = deque(maxlen=bpm_window)
         self.snr_history = deque(maxlen=bpm_window)
@@ -99,6 +100,7 @@ class LivenessDetector:
         self.harmonic_threshold = harmonic_threshold
         self.phase_threshold = phase_threshold
         self.screen_veto_threshold = screen_veto_threshold
+        self.quality_ratio_threshold = quality_ratio_threshold
 
         self.decision = self.PENDING
         self.confidence = 0.0
@@ -231,16 +233,48 @@ class LivenessDetector:
             avg_phase = None
             phase_ok = True  # cue not provided → skip gate
 
-        # Store check details for debugging / dashboard
-        self._check_details = {
-            "bpm_valid": bpm_valid,
+        # --- Quality vote ---
+        # Real webcam rPPG is noisy: any single quality metric fails on a
+        # fraction of frames even for a genuine live face. Requiring ALL of
+        # them simultaneously (a hard 8-way AND) made live humans almost never
+        # pass. Instead we treat the noisy quality cues as VOTES and require a
+        # majority, while keeping the few reliable signals as hard gates.
+        #
+        # Hard requirements:
+        #   - bpm_valid: pulse frequency is physically plausible
+        #   - (screen veto handled earlier as a silent hard DENY)
+        # Quality votes (each individually noisy):
+        #   snr, consistency, regularity, correlation, phase, harmonic, jitter
+        quality_votes = {
             "snr_valid": snr_valid,
             "consistent": consistent,
             "regular": regular,
             "correlated": correlated,
+            "phase_ok": phase_ok,
             "harmonic_ok": harmonic_ok,
             "jitter_pass": jitter_pass,
-            "phase_ok": phase_ok,
+        }
+        n_pass = sum(1 for v in quality_votes.values() if v)
+        n_total = len(quality_votes)
+        quality_ratio = n_pass / n_total
+
+        # Cross-ROI agreement is the key discriminator between a real pulse
+        # (present in BOTH forehead and cheek) and uncorrelated noise / a flat
+        # photo. We require at least ONE of {magnitude correlation, phase
+        # coherence} to pass when those cues are available — lenient enough not
+        # to reject a real face whose cheek signal is a little weak, but enough
+        # to block noise, which fails both.
+        has_cross = bool(self.correlation_history) or bool(self.phase_history)
+        cross_roi_ok = (not has_cross) or correlated or phase_ok
+
+        # Store check details for debugging / dashboard
+        self._check_details = {
+            "bpm_valid": bpm_valid,
+            "cross_roi_ok": cross_roi_ok,
+            "quality_ratio": quality_ratio,
+            "n_pass": n_pass,
+            "n_total": n_total,
+            **quality_votes,
             "avg_bpm": avg_bpm,
             "avg_snr": avg_snr,
             "bpm_std": bpm_std,
@@ -251,20 +285,20 @@ class LivenessDetector:
             "jitter_frac": jitter_frac,
         }
 
-        # --- Final decision: must pass ALL active checks ---
-        if (bpm_valid and snr_valid and consistent and regular and correlated
-                and harmonic_ok and jitter_pass and phase_ok):
+        # --- Final decision ---
+        # ALIVE iff the pulse frequency is plausible AND a majority of the
+        # quality cues agree. This tolerates a couple of noisy gates while
+        # still requiring substantial, multi-signal evidence of a real pulse.
+        if bpm_valid and cross_roi_ok and quality_ratio >= self.quality_ratio_threshold:
             self.decision = self.ALIVE
-            # Confidence: weighted combination of available quality metrics
             scores = [
-                min(1.0, avg_snr / (self.snr_threshold * 2)),
+                min(1.0, avg_snr / (self.snr_threshold * 2)) if avg_snr > 0 else 0.0,
                 avg_regularity,
                 avg_correlation,
+                quality_ratio,
             ]
             if avg_phase is not None:
                 scores.append(max(0.0, avg_phase))
-            if avg_harmonic is not None:
-                scores.append(min(1.0, avg_harmonic / 0.3))
             self.confidence = sum(scores) / len(scores)
         else:
             self.decision = self.DENIED
