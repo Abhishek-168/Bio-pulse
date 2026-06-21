@@ -1,0 +1,115 @@
+Idea Submission
+Team Name - 100xDev
+Theme - FinTech x AI Security
+Project Name - Bio-Pulse Authenticator
+Team Leader - Archie Yadav
+College / Institute Name - Baderia Global Institute of Engineering 
+and Management
+0
+1
+Project Overview
+The Problem & Bio-Pulse Solution
+The Scary Reality: Traditional biometrics (FaceID, Voice) are compromised. Generative 
+AI can clone a face or voice perfectly. 2,137% growth in deepfake fraud; $40B 
+projected bank losses by 2027; only 24.5% of deepfakes are detectable by humans.
+Bio-Pulse Authenticator uses Remote Photoplethysmography (rPPG) to detect a real 
+heartbeat via standard webcam. Every heartbeat causes tiny invisible color shifts in 
+the face. Our AI reads this signal to confirm a living human - not a photo, video, or 
+deepfake.
+Zero-Trust Innovation: Shifts from “Is this your face?” to “Is there a human behind this 
+face?”. Works with any standard webcam - no new hardware needed. 4-second UX: 
+Trigger → Verify → Detect → Approve.
+0
+2
+Technical Approach
+Technologies Used
+Python + OpenCV — captures live webcam video frames for real-time facial 
+video analysis
+MediaPipe Face Mesh — tracks 468 facial landmarks to precisely locate 
+forehead and cheek ROI regions
+open-rppg / pyVHR — open-source rPPG libraries that extract heartbeat signals 
+from subtle skin color changes; no model training needed
+React / Streamlit — renders a live pulsing BPM waveform dashboard with 
+instant ACCESS GRANTED / DENIED result
+Implementation Flow
+Step 1 — Trigger: User initiates a high-value transaction (e.g. $5,000+); 
+system opens a Security Scan window
+Step 2 — Capture: Webcam streams live video; MediaPipe maps 468 facial 
+landmarks and isolates forehead/cheek ROI at 30fps
+Step 3 — Signal Extraction: rPPG library reads micro color fluctuations in skin; 
+bandpass filter (0.75–3 Hz) isolates heartbeat frequency from noise
+Step 4 — Visualise: Live BPM waveform drawn over the user’s face in real 
+time; graph pulses green for a real human
+Step 5 — Decision: Valid pulse detected → Liveness Confirmed + Identity 
+Verified → ACCESS GRANTED. Flat-line (photo/video/deepfake) → ACCESS 
+DENIED instantly
+0
+3
+Feasibility & Viability
+Can We Build This in 12 Hours?
+Yes — no model training needed; open-rppg / pyVHR are plug-and-play 
+libraries; the full stack (Python + OpenCV + MediaPipe + React) is free and 
+open-source
+Zero new hardware required — works on any standard laptop or 
+smartphone webcam already built into every banking app
+Lightweight signal processing pipeline runs in real time on consumer 
+hardware; total latency under 4 seconds end-to-end
+Potential Challenges & Mitigations
+Lighting sensitivity — rPPG accuracy drops in very low or uneven light; 
+mitigated by adaptive ROI selection and an on-screen lighting guidance 
+prompt
+Processing latency on low-end devices — signal processing runs on a 
+background thread to keep the UI responsive; a visible 4-second countdown 
+guides the user
+Motion artifacts from head movement — MediaPipe continuously re-tracks 
+landmarks each frame; signal outliers are dropped via the bandpass filter
+Spoofing via high-res screen replay — a flat-line or synthetic pulse pattern 
+triggers instant ACCESS DENIED; demo proven live with iPad replay attack
+  Scalability — stateless API design means Bio-Pulse can be deployed as a 
+microservice and called by any existing banking or fintech app with one API 
+endpoint
+0
+4
+Impact and Benefits
+Potential Impact on the Target Audience
+Banks/fintech: drop-in liveness layer for high-value transactions, 
+no hardware upgrades
+End users: visible 4-second pulse check builds real trust
+Security teams: unforgeable heartbeat signal defeats deepfakes, 
+photos, and replays
+Compliance: physiological proof-of-presence strengthens KYC/AML 
+audit trails
+Benefits of the Solution
+Social: restores digital identity trust; protects vulnerable users 
+from deepfake fraud
+Financial: tackles $40B loss problem; 10% reduction alone saves 
+$4B industry-wide
+Technical: real signal processing (not just an API call); stateless 
+microservice scales to any platform
+0
+5
+Research and References
+Research Backing
+rPPG Science: De Haan & Jeanne (2013) — "Robust Pulse Rate From 
+Chrominance-Based rPPG" — IEEE Transactions on Biomedical Engineering; 
+foundational paper proving heartbeat can be extracted from facial video 
+using chrominance signals
+MIT Media Lab Study — only 24.5% of high-quality deepfakes are detectable 
+by the human eye; confirms the need for physiological rather than visual 
+liveness checks
+Deloitte / Accenture 2024 Report — generative-AI fraud projected to cost 
+banks $40B by 2027; deepfake fraud attempts grew 2,137% over the last 3 
+years
+Libraries & Tools
+pyVHR Framework: github.com/phuselab/pyVHR — open-source remote PPG 
+library; peer-reviewed, used in academic rPPG benchmarking studies
+open-rppg: github.com/open-rppg/open-rppg — lightweight real-time rPPG 
+implementation optimised for webcam streams
+MediaPipe Face Mesh: 
+ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker — Google's 
+468-point real-time facial landmark detection
+OpenCV Documentation: docs.opencv.org — video capture and frame 
+processing pipeline
+Claude (Anthropic)
+0
+6
