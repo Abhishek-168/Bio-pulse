@@ -5,17 +5,30 @@ Uses multiple criteria to prevent photo/video/deepfake spoofing:
 1. BPM must be in a physiologically plausible range (45–180 BPM)
 2. Signal-to-noise ratio (SNR) must exceed a threshold
 3. Signal must show temporal consistency (not wild jumps)
-4. Peak regularity — real heartbeats have evenly-spaced peaks;
-   random noise from a photo does not
-5. Multi-ROI cross-correlation — forehead and cheek signals must
-   correlate (blood flows everywhere on a real face; sensor noise
-   on a photo is uncorrelated between regions)
+4. Peak regularity — real heartbeats have evenly-spaced peaks; random noise
+   from a photo does not. This is a LOWER bound (anti-noise).
+5. HRV jitter band — real heartbeats also have *natural* beat-to-beat
+   variability. A synthetic injected tone is unnaturally perfect. So we also
+   require an UPPER bound on regularity via the HRV `jitter_ok` flag.
 
-A photo, video replay, or deepfake will produce either:
-  - A flat-line (no pulse → SNR ≈ 0)
-  - Random noise that lacks peak regularity
-  - Uncorrelated signals between face regions
-  - BPM outside the human range
+   Together, checks 4 and 5 close a contradiction that existed before: peak
+   regularity alone REWARDS perfect periodicity (score → 1.0), so a synthetic
+   perfectly-periodic "fake pulse" used to pass. `regular` rejects noise from
+   below; `jitter_ok` rejects too-perfect synthesis from above.
+6. Multi-ROI magnitude correlation — forehead and cheek signals must
+   correlate (blood flows everywhere on a real face).
+7. Multi-ROI phase coherence — the two regions must also be in-phase at the
+   pulse frequency. A replay can inject the same tone in both ROIs (high
+   magnitude correlation) but stable cross-region phase is much harder to fake.
+8. Harmonic structure — a real PPG waveform has a 2nd harmonic; a pure
+   synthetic sinusoid does not.
+
+SILENT SCREEN VETO: a separate ScreenDetector supplies an `is_screen` score.
+If it is high, the decision is forced to DENIED immediately and NOTHING about
+it is exposed for display — an attacker holding up a phone/laptop gets no
+feedback about why they were rejected.
+
+A photo, video replay, or deepfake will trip at least one of these.
 """
 
 import numpy as np
@@ -29,7 +42,7 @@ class LivenessDetector:
     Parameters
     ----------
     bpm_window : int
-        Number of recent BPM readings to keep for consistency check.
+        Number of recent readings to keep for averaging/consistency.
     snr_threshold : float
         Minimum SNR (dB) to consider the signal as containing a real pulse.
     bpm_range : tuple
@@ -37,11 +50,17 @@ class LivenessDetector:
     consistency_threshold : float
         Maximum allowed standard deviation of recent BPM readings.
     min_readings : int
-        Minimum number of BPM readings before making a decision.
+        Minimum number of readings before making a decision.
     regularity_threshold : float
-        Minimum peak regularity score (0–1) to consider the signal real.
+        Minimum peak regularity score (0–1) — anti-noise lower bound.
     correlation_threshold : float
-        Minimum cross-correlation between forehead and cheek signals.
+        Minimum magnitude cross-correlation between forehead and cheek.
+    harmonic_threshold : float
+        Minimum 2nd-harmonic/fundamental energy ratio.
+    phase_threshold : float
+        Minimum cross-ROI phase coherence at the pulse frequency.
+    screen_veto_threshold : float
+        Averaged is_screen score at/above which the decision is silently DENIED.
     """
 
     # Decision states
@@ -58,43 +77,80 @@ class LivenessDetector:
         min_readings: int = 5,
         regularity_threshold: float = 0.2,
         correlation_threshold: float = 0.4,
+        harmonic_threshold: float = 0.05,
+        phase_threshold: float = 0.3,
+        screen_veto_threshold: float = 0.5,
     ):
         self.bpm_history = deque(maxlen=bpm_window)
         self.snr_history = deque(maxlen=bpm_window)
         self.regularity_history = deque(maxlen=bpm_window)
         self.correlation_history = deque(maxlen=bpm_window)
+        self.harmonic_history = deque(maxlen=bpm_window)
+        self.phase_history = deque(maxlen=bpm_window)
+        self.jitter_history = deque(maxlen=bpm_window)
+        self.screen_history = deque(maxlen=bpm_window)
+
         self.snr_threshold = snr_threshold
         self.bpm_min, self.bpm_max = bpm_range
         self.consistency_threshold = consistency_threshold
         self.min_readings = min_readings
         self.regularity_threshold = regularity_threshold
         self.correlation_threshold = correlation_threshold
+        self.harmonic_threshold = harmonic_threshold
+        self.phase_threshold = phase_threshold
+        self.screen_veto_threshold = screen_veto_threshold
+
         self.decision = self.PENDING
         self.confidence = 0.0
         self._failed_readings = 0  # consecutive bad readings counter
         self._check_details = {}  # for debugging
 
     def update(self, bpm: float, snr: float,
-               regularity: float = 1.0, correlation: float = 1.0) -> str:
+               regularity: float = 1.0, correlation: float = 1.0,
+               *, harmonic_ratio: float = None, jitter_ok: bool = None,
+               phase_coherence: float = None, is_screen: float = 0.0) -> str:
         """
-        Feed a new BPM + SNR + regularity + correlation reading.
+        Feed a new set of pulse measurements and return the current decision.
+
+        The first four parameters are positional for backward compatibility
+        (old callers used update(bpm, snr) or update(bpm, snr, reg, corr)).
+        The anti-spoof cues are keyword-only and default to "not provided"
+        (None), in which case their gate is skipped.
 
         Parameters
         ----------
-        bpm : float
-            Latest BPM estimate from PulseExtractor.
-        snr : float
-            Latest SNR value from PulseExtractor.
+        bpm, snr : float
+            Latest BPM / SNR estimate from PulseExtractor.
         regularity : float
-            Peak regularity score (0–1) from PulseExtractor.
+            Peak regularity score (0–1) — anti-noise lower bound.
         correlation : float
-            Cross-correlation between forehead and cheek signals.
+            Magnitude cross-correlation between forehead and cheek signals.
+        harmonic_ratio : float, optional
+            2nd-harmonic/fundamental energy ratio.
+        jitter_ok : bool, optional
+            Whether HRV inter-beat-interval variability is in the natural band.
+        phase_coherence : float, optional
+            Cross-ROI phase coherence at the pulse frequency.
+        is_screen : float
+            Screen-replay likelihood [0–1] from ScreenDetector (SILENT veto).
 
         Returns
         -------
         decision : str
             One of PENDING, ALIVE, or DENIED.
         """
+        # --- SILENT screen veto (highest priority) ---
+        # Averaged so a single noisy frame can't veto, but a sustained screen
+        # signature does. No visible check entry is produced.
+        self.screen_history.append(float(is_screen))
+        avg_screen = sum(self.screen_history) / len(self.screen_history)
+        if avg_screen >= self.screen_veto_threshold:
+            self.decision = self.DENIED
+            self.confidence = 0.0
+            self._check_details["_screen_veto"] = True  # debug only, never drawn
+            return self.decision
+        self._check_details.pop("_screen_veto", None)
+
         if bpm <= 0 or snr <= 0:
             self._failed_readings += 1
             # After enough failed readings, this is a spoof/photo
@@ -113,6 +169,12 @@ class LivenessDetector:
         self.snr_history.append(snr)
         self.regularity_history.append(regularity)
         self.correlation_history.append(correlation)
+        if harmonic_ratio is not None:
+            self.harmonic_history.append(harmonic_ratio)
+        if phase_coherence is not None:
+            self.phase_history.append(phase_coherence)
+        if jitter_ok is not None:
+            self.jitter_history.append(1.0 if jitter_ok else 0.0)
 
         # Need enough readings for a stable decision
         if len(self.bpm_history) < self.min_readings:
@@ -134,40 +196,75 @@ class LivenessDetector:
             bpm_std = self._std(bpm_list)
             consistent = bpm_std < self.consistency_threshold
         else:
+            bpm_std = 0.0
             consistent = True
 
-        # --- Check 4: Peak regularity (anti-photo) ---
+        # --- Check 4: Peak regularity (anti-noise lower bound) ---
         avg_regularity = sum(self.regularity_history) / len(self.regularity_history)
         regular = avg_regularity >= self.regularity_threshold
 
-        # --- Check 5: Multi-ROI correlation (anti-photo) ---
+        # --- Check 5: Multi-ROI magnitude correlation (anti-photo) ---
         avg_correlation = sum(self.correlation_history) / len(self.correlation_history)
         correlated = avg_correlation >= self.correlation_threshold
 
-        # Store check details for debugging
+        # --- Check 6: Harmonic structure (anti synthetic single-tone) ---
+        if self.harmonic_history:
+            avg_harmonic = sum(self.harmonic_history) / len(self.harmonic_history)
+            harmonic_ok = avg_harmonic >= self.harmonic_threshold
+        else:
+            avg_harmonic = None
+            harmonic_ok = True  # cue not provided → skip gate
+
+        # --- Check 7: HRV jitter band (anti synthetic too-perfect) ---
+        if self.jitter_history:
+            jitter_frac = sum(self.jitter_history) / len(self.jitter_history)
+            jitter_pass = jitter_frac >= 0.5  # majority of recent frames natural
+        else:
+            jitter_frac = None
+            jitter_pass = True  # cue not provided → skip gate
+
+        # --- Check 8: Cross-ROI phase coherence (anti replay) ---
+        if self.phase_history:
+            avg_phase = sum(self.phase_history) / len(self.phase_history)
+            phase_ok = avg_phase >= self.phase_threshold
+        else:
+            avg_phase = None
+            phase_ok = True  # cue not provided → skip gate
+
+        # Store check details for debugging / dashboard
         self._check_details = {
             "bpm_valid": bpm_valid,
             "snr_valid": snr_valid,
             "consistent": consistent,
             "regular": regular,
             "correlated": correlated,
+            "harmonic_ok": harmonic_ok,
+            "jitter_pass": jitter_pass,
+            "phase_ok": phase_ok,
             "avg_bpm": avg_bpm,
             "avg_snr": avg_snr,
-            "bpm_std": bpm_std if len(self.bpm_history) >= 3 else 0.0,
+            "bpm_std": bpm_std,
             "avg_regularity": avg_regularity,
             "avg_correlation": avg_correlation,
+            "avg_harmonic": avg_harmonic,
+            "avg_phase": avg_phase,
+            "jitter_frac": jitter_frac,
         }
 
-        # --- Final decision ---
-        # Must pass ALL checks to be considered alive
-        if bpm_valid and snr_valid and consistent and regular and correlated:
+        # --- Final decision: must pass ALL active checks ---
+        if (bpm_valid and snr_valid and consistent and regular and correlated
+                and harmonic_ok and jitter_pass and phase_ok):
             self.decision = self.ALIVE
-            # Confidence: weighted combination of all metrics
+            # Confidence: weighted combination of available quality metrics
             scores = [
                 min(1.0, avg_snr / (self.snr_threshold * 2)),
                 avg_regularity,
                 avg_correlation,
             ]
+            if avg_phase is not None:
+                scores.append(max(0.0, avg_phase))
+            if avg_harmonic is not None:
+                scores.append(min(1.0, avg_harmonic / 0.3))
             self.confidence = sum(scores) / len(scores)
         else:
             self.decision = self.DENIED
@@ -184,6 +281,8 @@ class LivenessDetector:
         bpm_std = 0.0
         avg_regularity = 0.0
         avg_correlation = 0.0
+        avg_harmonic = 0.0
+        avg_phase = 0.0
 
         if self.bpm_history:
             bpm_list = list(self.bpm_history)
@@ -200,6 +299,12 @@ class LivenessDetector:
         if self.correlation_history:
             avg_correlation = sum(self.correlation_history) / len(self.correlation_history)
 
+        if self.harmonic_history:
+            avg_harmonic = sum(self.harmonic_history) / len(self.harmonic_history)
+
+        if self.phase_history:
+            avg_phase = sum(self.phase_history) / len(self.phase_history)
+
         return {
             "decision": self.decision,
             "confidence": self.confidence,
@@ -208,6 +313,8 @@ class LivenessDetector:
             "bpm_std": bpm_std,
             "avg_regularity": avg_regularity,
             "avg_correlation": avg_correlation,
+            "avg_harmonic": avg_harmonic,
+            "avg_phase": avg_phase,
             "readings": len(self.bpm_history),
             "min_readings": self.min_readings,
             "check_details": self._check_details,
@@ -219,6 +326,10 @@ class LivenessDetector:
         self.snr_history.clear()
         self.regularity_history.clear()
         self.correlation_history.clear()
+        self.harmonic_history.clear()
+        self.phase_history.clear()
+        self.jitter_history.clear()
+        self.screen_history.clear()
         self.decision = self.PENDING
         self.confidence = 0.0
         self._failed_readings = 0
