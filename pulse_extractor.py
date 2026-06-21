@@ -186,12 +186,12 @@ class PulseExtractor:
         peaks, properties = find_peaks(
             filtered,
             distance=min_distance,
-            height=0.3 * sig_std,  # peaks must be at least 30% of std above zero
-            prominence=0.2 * sig_std,
+            height=0.15 * sig_std,  # peaks must be at least 15% of std above zero
+            prominence=0.1 * sig_std,
         )
 
         peak_count = len(peaks)
-        if peak_count < 3:
+        if peak_count < 2:
             return peak_count, 0.0, 0.0
 
         # Compute inter-peak intervals
@@ -205,8 +205,10 @@ class PulseExtractor:
         # Low CV = regular spacing = real heartbeat
         # High CV = irregular = noise
         interval_cv = np.std(intervals) / mean_interval
-        # Convert CV to a 0-1 regularity score (CV=0 → 1.0, CV>0.5 → ~0)
-        regularity = max(0.0, 1.0 - 2.0 * interval_cv)
+        # Convert CV to a 0-1 regularity score
+        # Real heartbeats have natural HRV (CV ~0.1-0.25), so use a gentler curve
+        # CV=0 → 1.0, CV~0.4 → 0.5, CV>0.8 → ~0
+        regularity = max(0.0, 1.0 - 1.2 * interval_cv)
 
         # Average peak amplitude relative to signal std
         peak_amplitudes = filtered[peaks]

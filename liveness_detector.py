@@ -56,7 +56,7 @@ class LivenessDetector:
         bpm_range: tuple = (50, 160),
         consistency_threshold: float = 15.0,
         min_readings: int = 5,
-        regularity_threshold: float = 0.35,
+        regularity_threshold: float = 0.2,
         correlation_threshold: float = 0.4,
     ):
         self.bpm_history = deque(maxlen=bpm_window)
