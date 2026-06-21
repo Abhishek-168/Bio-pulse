@@ -1,5 +1,27 @@
-/node_modules
+# Python virtual environment
+venv/
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment variables
+.env
+.env.local
+
+# Node
 node_modules/
 /dist
 
-.env
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp / extracted files
+bio_pulse2.txt
