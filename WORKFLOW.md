@@ -107,18 +107,5 @@ stateDiagram-v2
     end note
 ```
 
-## 4. Optional backend service (BE — Node/Express + Redis)
-
-```mermaid
-flowchart LR
-    A["Client POST /verify (video bytes)"] --> B["Express server"]
-    B --> C["Enqueue job → Redis list (video:queue)"]
-    C --> D["SSE stream: status = enqueued"]
-    D --> E["Poll Redis job:status"]
-    E --> F{"status done/error?"}
-    F -- No --> E
-    F -- Yes --> G["Stream final status + close"]
-```
-
 ## Key idea
 Appearance-based detectors ask *"does this look real?"*. Bio-Pulse asks *"is this body alive?"* — proving a real, frequency-correct heartbeat (rPPG) that is spatially consistent across face regions, while an attacker must simultaneously beat the pulse checks, cross-ROI blood-flow consistency, an active liveness challenge, and a silent screen-replay detector — all on a commodity webcam.
