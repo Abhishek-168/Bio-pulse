@@ -524,23 +524,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Center: Mode Switcher Pills */}
-        <div className="flex items-center bg-[#141824] p-1 rounded border border-[#1E2433] text-xs font-medium">
-          <button
-            onClick={() => setEngineMode('browser')}
-            className={`px-3 py-1.5 rounded transition ${engineMode === 'browser' ? 'bg-[#06B6D4] text-black font-semibold shadow' : 'text-[#94A3B8] hover:text-white'}`}
-          >
-            Browser Engine (TS)
-          </button>
-          <button
-            onClick={() => setEngineMode('python_ws')}
-            className={`px-3 py-1.5 rounded transition flex items-center gap-1.5 ${engineMode === 'python_ws' ? 'bg-[#10B981] text-black font-semibold shadow' : 'text-[#94A3B8] hover:text-white'}`}
-          >
-            Python Backend (WS)
-            {wsConnected ? <Wifi className="w-3.5 h-3.5 text-black" /> : <WifiOff className="w-3.5 h-3.5 text-red-400" />}
-          </button>
-        </div>
-
         {/* Right Controls */}
         <div className="flex items-center space-x-3 text-xs font-mono">
           {/* Camera Selector */}
